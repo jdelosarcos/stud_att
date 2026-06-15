@@ -1,6 +1,7 @@
 import re
 import warnings
 import os
+import gc
 from collections import Counter
 from pathlib import Path
 
@@ -40,6 +41,9 @@ DEFAULT_DATA = APP_DIR / "data" / "StudProfile.xlsx"
 IS_CLOUD_DEPLOYMENT = os.getenv("STREAMLIT_SERVER_HEADLESS") == "true"
 LIMIT_RESOURCES = os.getenv("LIMIT_ML_RESOURCES", "true").lower() == "true" if IS_CLOUD_DEPLOYMENT else False
 
+# Aggressive memory cleanup on startup
+gc.collect()
+
 st.set_page_config(
     page_title="Student Degree Outcome Prediction",
     page_icon="🎓",
@@ -51,6 +55,14 @@ if "processing" not in st.session_state:
     st.session_state.processing = False
 if "error_occurred" not in st.session_state:
     st.session_state.error_occurred = False
+
+# Memory management for cloud deployment
+def cleanup_memory():
+    """Aggressive garbage collection for memory-constrained environments."""
+    gc.collect()
+
+# Initial cleanup on app start
+cleanup_memory()
 
 # -----------------------------
 # Utility and preprocessing
