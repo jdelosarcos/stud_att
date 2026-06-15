@@ -1,5 +1,6 @@
 import re
 import warnings
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -35,11 +36,21 @@ RANDOM_STATE = 42
 APP_DIR = Path(__file__).parent
 DEFAULT_DATA = APP_DIR / "data" / "StudProfile.xlsx"
 
+# Environment-aware configuration
+IS_CLOUD_DEPLOYMENT = os.getenv("STREAMLIT_SERVER_HEADLESS") == "true"
+LIMIT_RESOURCES = os.getenv("LIMIT_ML_RESOURCES", "true").lower() == "true" if IS_CLOUD_DEPLOYMENT else False
+
 st.set_page_config(
     page_title="Student Degree Outcome Prediction",
     page_icon="🎓",
     layout="wide",
 )
+
+# Initialize session state for tracking
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+if "error_occurred" not in st.session_state:
+    st.session_state.error_occurred = False
 
 # -----------------------------
 # Utility and preprocessing
@@ -284,49 +295,68 @@ def make_preprocessor(X):
 
 
 def safe_cv(y):
+    """Return appropriate cross-validation strategy based on data and environment."""
     min_count = pd.Series(y).value_counts().min()
-    if min_count >= 5:
-        return StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-    if min_count >= 3:
-        return StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
-    return StratifiedKFold(n_splits=2, shuffle=True, random_state=RANDOM_STATE)
+    
+    # Use fewer folds on cloud deployment to save resources
+    if LIMIT_RESOURCES:
+        if min_count >= 3:
+            return StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+        return StratifiedKFold(n_splits=2, shuffle=True, random_state=RANDOM_STATE)
+    else:
+        if min_count >= 5:
+            return StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+        if min_count >= 3:
+            return StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+        return StratifiedKFold(n_splits=2, shuffle=True, random_state=RANDOM_STATE)
 
 
 def make_model_zoo(n_classes):
-    models = {
-        "Logistic Regression Balanced": LogisticRegression(max_iter=3000, class_weight="balanced", random_state=RANDOM_STATE),
-        "Random Forest Balanced": RandomForestClassifier(n_estimators=350, min_samples_leaf=2, class_weight="balanced_subsample", random_state=RANDOM_STATE, n_jobs=-1),
-        "Extra Trees Balanced": ExtraTreesClassifier(n_estimators=350, min_samples_leaf=2, class_weight="balanced", random_state=RANDOM_STATE, n_jobs=-1),
-        "Balanced Random Forest": BalancedRandomForestClassifier(n_estimators=300, random_state=RANDOM_STATE, replacement=True, sampling_strategy="all", n_jobs=-1),
-        "Easy Ensemble": EasyEnsembleClassifier(n_estimators=15, random_state=RANDOM_STATE, n_jobs=-1),
-    }
-    try:
-        from xgboost import XGBClassifier
-        objective = "binary:logistic" if n_classes == 2 else "multi:softprob"
-        models["XGBoost Conservative"] = XGBClassifier(
-            n_estimators=120, max_depth=2, learning_rate=0.05, subsample=0.85,
-            colsample_bytree=0.85, objective=objective, eval_metric="logloss" if n_classes == 2 else "mlogloss",
-            random_state=RANDOM_STATE
-        )
-    except Exception:
-        pass
-    try:
-        from lightgbm import LGBMClassifier
-        models["LightGBM Conservative"] = LGBMClassifier(
-            n_estimators=100, max_depth=3, learning_rate=0.05,
-            class_weight="balanced", random_state=RANDOM_STATE, verbose=-1
-        )
-    except Exception:
-        pass
-    try:
-        from catboost import CatBoostClassifier
-        loss = "Logloss" if n_classes == 2 else "MultiClass"
-        models["CatBoost Balanced"] = CatBoostClassifier(
-            iterations=150, depth=3, learning_rate=0.05, loss_function=loss,
-            auto_class_weights="Balanced", random_seed=RANDOM_STATE, verbose=False
-        )
-    except Exception:
-        pass
+    # Use limited model set on cloud to conserve resources
+    if LIMIT_RESOURCES:
+        models = {
+            "Logistic Regression": LogisticRegression(max_iter=3000, class_weight="balanced", random_state=RANDOM_STATE),
+            "Random Forest": RandomForestClassifier(n_estimators=100, min_samples_leaf=2, class_weight="balanced_subsample", random_state=RANDOM_STATE, n_jobs=-1),
+            "Balanced Random Forest": BalancedRandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE, replacement=True, sampling_strategy="all", n_jobs=-1),
+        }
+    else:
+        models = {
+            "Logistic Regression Balanced": LogisticRegression(max_iter=3000, class_weight="balanced", random_state=RANDOM_STATE),
+            "Random Forest Balanced": RandomForestClassifier(n_estimators=350, min_samples_leaf=2, class_weight="balanced_subsample", random_state=RANDOM_STATE, n_jobs=-1),
+            "Extra Trees Balanced": ExtraTreesClassifier(n_estimators=350, min_samples_leaf=2, class_weight="balanced", random_state=RANDOM_STATE, n_jobs=-1),
+            "Balanced Random Forest": BalancedRandomForestClassifier(n_estimators=300, random_state=RANDOM_STATE, replacement=True, sampling_strategy="all", n_jobs=-1),
+            "Easy Ensemble": EasyEnsembleClassifier(n_estimators=15, random_state=RANDOM_STATE, n_jobs=-1),
+        }
+    
+    # Add gradient boosting models only in non-cloud environments
+    if not LIMIT_RESOURCES:
+        try:
+            from xgboost import XGBClassifier
+            objective = "binary:logistic" if n_classes == 2 else "multi:softprob"
+            models["XGBoost Conservative"] = XGBClassifier(
+                n_estimators=120, max_depth=2, learning_rate=0.05, subsample=0.85,
+                colsample_bytree=0.85, objective=objective, eval_metric="logloss" if n_classes == 2 else "mlogloss",
+                random_state=RANDOM_STATE
+            )
+        except Exception:
+            pass
+        try:
+            from lightgbm import LGBMClassifier
+            models["LightGBM Conservative"] = LGBMClassifier(
+                n_estimators=100, max_depth=3, learning_rate=0.05,
+                class_weight="balanced", random_state=RANDOM_STATE, verbose=-1
+            )
+        except Exception:
+            pass
+        try:
+            from catboost import CatBoostClassifier
+            loss = "Logloss" if n_classes == 2 else "MultiClass"
+            models["CatBoost Balanced"] = CatBoostClassifier(
+                iterations=150, depth=3, learning_rate=0.05, loss_function=loss,
+                auto_class_weights="Balanced", random_seed=RANDOM_STATE, verbose=False
+            )
+        except Exception:
+            pass
     return models
 
 
@@ -344,10 +374,15 @@ def evaluate_models_cached(X, y, feature_set_name):
     rows = []
     n_classes = y.nunique()
     models = make_model_zoo(n_classes)
-    samplers = [("No Sampling", None), ("RandomOverSampler", RandomOverSampler(random_state=RANDOM_STATE))]
-    if pd.Series(y).value_counts().min() >= 3:
-        k = max(1, min(3, pd.Series(y).value_counts().min() - 1))
-        samplers.append(("SMOTE", SMOTE(random_state=RANDOM_STATE, k_neighbors=k)))
+    
+    # Use fewer samplers on cloud to conserve resources
+    if LIMIT_RESOURCES:
+        samplers = [("No Sampling", None), ("RandomOverSampler", RandomOverSampler(random_state=RANDOM_STATE))]
+    else:
+        samplers = [("No Sampling", None), ("RandomOverSampler", RandomOverSampler(random_state=RANDOM_STATE))]
+        if pd.Series(y).value_counts().min() >= 3:
+            k = max(1, min(3, pd.Series(y).value_counts().min() - 1))
+            samplers.append(("SMOTE", SMOTE(random_state=RANDOM_STATE, k_neighbors=k)))
 
     for sampler_name, sampler in samplers:
         for model_name, model in models.items():
@@ -357,7 +392,10 @@ def evaluate_models_cached(X, y, feature_set_name):
                     steps.append(("sampler", sampler))
                 steps.append(("model", model))
                 pipe = ImbPipeline(steps)
-                scores = cross_validate(pipe, X, y, cv=cv, scoring=scoring, n_jobs=-1, error_score="raise")
+                
+                # Reduce n_jobs on cloud to prevent resource exhaustion
+                n_jobs = 1 if LIMIT_RESOURCES else -1
+                scores = cross_validate(pipe, X, y, cv=cv, scoring=scoring, n_jobs=n_jobs, error_score="raise")
                 rows.append({
                     "Feature_Set": feature_set_name,
                     "Sampler": sampler_name,
@@ -424,7 +462,7 @@ def run_status_association_rules(df, classes, min_support=0.04, min_confidence=0
     itemsets = fpgrowth(basket, min_support=min_support, use_colnames=True)
     if len(itemsets) == 0:
         return pd.DataFrame()
-    rules = association_rules(itemsets, metric="confidence", min_threshold=min_confidence)
+    rules = association_rules(itemsets, len(itemsets), metric="confidence", min_threshold=min_confidence)
     status_items = {f"degree_status={c}" for c in classes}
     rules = rules[rules["consequents"].apply(lambda x: len(set(x) & status_items) > 0)]
     if len(rules) == 0:
@@ -440,7 +478,9 @@ def run_status_association_rules(df, classes, min_support=0.04, min_confidence=0
 # -----------------------------
 st.title("🎓 Student Degree Outcome Prediction and Pattern Mining")
 st.caption("A deployment-ready educational data mining dashboard for predicting and analyzing student completion, stopping, and shifting behavior.")
-
+# Display deployment info if on cloud
+if LIMIT_RESOURCES:
+    st.warning("⚠️ Running in resource-limited mode (Streamlit Cloud). Model training is optimized for faster execution.")
 with st.sidebar:
     st.header("Data source")
     uploaded_file = st.file_uploader("Upload student profile Excel file", type=["xlsx", "xls"])
@@ -450,16 +490,33 @@ with st.sidebar:
     min_support = st.slider("Association rule support", 0.01, 0.20, 0.04, 0.01)
     min_confidence = st.slider("Association rule confidence", 0.30, 0.90, 0.50, 0.05)
 
-if uploaded_file is not None:
-    raw_df = load_excel(uploaded_file)
-elif DEFAULT_DATA.exists():
-    raw_df = load_excel(DEFAULT_DATA)
-else:
-    st.info("Upload an Excel file to begin. Optional: place a private default dataset at `data/StudProfile.xlsx`.")
+raw_df = None
+try:
+    if uploaded_file is not None:
+        raw_df = load_excel(uploaded_file)
+    elif DEFAULT_DATA.exists():
+        raw_df = load_excel(DEFAULT_DATA)
+except Exception as e:
+    st.error(f"Error loading file: {str(e)}")
     st.stop()
 
-clean_df = prepare_data(raw_df)
-model3_df = clean_df[clean_df["degree_status"].isin(["Completed", "Stopped", "Shifted"])].copy()
+if raw_df is None:
+    st.info("Upload an Excel file to begin. Optional: place a private default dataset at `data/StudProfile.xlsx`.")
+    st.stop()
+    raise SystemExit
+
+try:
+    clean_df = prepare_data(raw_df)
+    model3_df = clean_df[clean_df["degree_status"].isin(["Completed", "Stopped", "Shifted"])].copy()
+except Exception as e:
+    st.error(f"Error processing data: {str(e)}")
+    st.stop()
+    raise SystemExit
+
+if 'clean_df' not in locals() or clean_df is None:
+    st.error("Data processing failed. Please try again.")
+    st.stop()
+    raise SystemExit
 
 status_counts = clean_df["degree_status"].value_counts().reset_index()
 status_counts.columns = ["Degree Status", "Count"]
@@ -519,39 +576,47 @@ with tabs[2]:
     if y.nunique() < 2:
         st.error("At least two classes are required for modeling. Lower the minimum class count or check the target field.")
     else:
-        with st.spinner("Training and cross-validating models..."):
-            results = evaluate_models_cached(X, y, feature_set)
-        st.dataframe(results, use_container_width=True)
-        plot_df = results.dropna(subset=["F1_macro"]).head(12).copy()
-        if len(plot_df):
-            plot_df["Model Label"] = plot_df["Sampler"] + " | " + plot_df["Model"]
-            fig = px.bar(plot_df.iloc[::-1], x="F1_macro", y="Model Label", orientation="h", title="Top models by F1-macro")
-            st.plotly_chart(fig, use_container_width=True)
-            st.write("**Explanation:** F1-macro is emphasized because it treats minority classes more fairly than accuracy in imbalanced datasets.")
-
-        best = results.dropna(subset=["F1_macro"]).iloc[0]
-        pipe = build_pipeline(best, X, y)
         try:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=RANDOM_STATE, stratify=y)
-        except Exception:
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=RANDOM_STATE)
-        pipe.fit(X_train, y_train)
-        y_pred = pipe.predict(X_test)
-        metrics_df = pd.DataFrame([{
-            "Accuracy": accuracy_score(y_test, y_pred),
-            "Balanced Accuracy": balanced_accuracy_score(y_test, y_pred),
-            "Precision Macro": precision_score(y_test, y_pred, average="macro", zero_division=0),
-            "Recall Macro": recall_score(y_test, y_pred, average="macro", zero_division=0),
-            "F1 Macro": f1_score(y_test, y_pred, average="macro", zero_division=0),
-        }])
-        st.write("Best model:", f"**{best['Sampler']} | {best['Model']}**")
-        st.dataframe(metrics_df, use_container_width=True)
-        cm = confusion_matrix(y_test, y_pred, labels=pipe.classes_)
-        fig = go.Figure(data=go.Heatmap(z=cm, x=pipe.classes_, y=pipe.classes_, colorscale="Blues", text=cm, texttemplate="%{text}"))
-        fig.update_layout(title="Best model confusion matrix", xaxis_title="Predicted", yaxis_title="Actual")
-        st.plotly_chart(fig, use_container_width=True)
-        st.session_state["model_objects"] = (pipe, X, y, X_test, y_test, y_pred, best, results)
-        st.write("**Explanation:** The confusion matrix shows which outcomes are often misclassified. Frequent confusion means the classes are overlapping or predictors are weak.")
+            with st.spinner("Training and cross-validating models..."):
+                results = evaluate_models_cached(X, y, feature_set)
+            st.dataframe(results, use_container_width=True)
+            plot_df = results.dropna(subset=["F1_macro"]).head(12).copy()
+            if len(plot_df):
+                plot_df["Model Label"] = plot_df["Sampler"] + " | " + plot_df["Model"]
+                fig = px.bar(plot_df.iloc[::-1], x="F1_macro", y="Model Label", orientation="h", title="Top models by F1-macro")
+                st.plotly_chart(fig, use_container_width=True)
+                st.write("**Explanation:** F1-macro is emphasized because it treats minority classes more fairly than accuracy in imbalanced datasets.")
+
+            best = results.dropna(subset=["F1_macro"]).iloc[0]
+            pipe = build_pipeline(best, X, y)
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=RANDOM_STATE, stratify=y)
+            except Exception:
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=RANDOM_STATE)
+            
+            with st.spinner("Fitting best model on training set..."):
+                pipe.fit(X_train, y_train)
+            
+            y_pred = pipe.predict(X_test)
+            metrics_df = pd.DataFrame([{
+                "Accuracy": accuracy_score(y_test, y_pred),
+                "Balanced Accuracy": balanced_accuracy_score(y_test, y_pred),
+                "Precision Macro": precision_score(y_test, y_pred, average="macro", zero_division=0),
+                "Recall Macro": recall_score(y_test, y_pred, average="macro", zero_division=0),
+                "F1 Macro": f1_score(y_test, y_pred, average="macro", zero_division=0),
+            }])
+            st.write("Best model:", f"**{best['Sampler']} | {best['Model']}**")
+            st.dataframe(metrics_df, use_container_width=True)
+            cm = confusion_matrix(y_test, y_pred, labels=pipe.classes_)
+            fig = go.Figure(data=go.Heatmap(z=cm, x=pipe.classes_, y=pipe.classes_, colorscale="Blues", text=cm, texttemplate="%{text}"))
+            fig.update_layout(title="Best model confusion matrix", xaxis_title="Predicted", yaxis_title="Actual")
+            st.plotly_chart(fig, use_container_width=True)
+            st.session_state["model_objects"] = (pipe, X, y, X_test, y_test, y_pred, best, results)
+            st.write("**Explanation:** The confusion matrix shows which outcomes are often misclassified. Frequent confusion means the classes are overlapping or predictors are weak.")
+        except Exception as e:
+            st.error(f"❌ Model training failed: {str(e)}")
+            if LIMIT_RESOURCES:
+                st.info("💡 Try lowering 'Minimum records per class' or uploading a smaller dataset, as this environment has limited computational resources.")
 
 with tabs[3]:
     st.subheader("Feature influence analysis")
@@ -559,9 +624,11 @@ with tabs[3]:
         st.info("Run the Prediction Models tab first.")
     else:
         pipe, X, y, X_test, y_test, y_pred, best, results = st.session_state["model_objects"]
-        with st.spinner("Computing permutation importance..."):
-            try:
-                perm = permutation_importance(pipe, X_test, y_test, n_repeats=10, random_state=RANDOM_STATE, scoring="f1_macro", n_jobs=-1)
+        try:
+            with st.spinner("Computing permutation importance..."):
+                # Use fewer repeats on cloud to save resources
+                n_repeats = 5 if LIMIT_RESOURCES else 10
+                perm = permutation_importance(pipe, X_test, y_test, n_repeats=n_repeats, random_state=RANDOM_STATE, scoring="f1_macro", n_jobs=1)
                 importance_df = pd.DataFrame({
                     "Feature": X_test.columns,
                     "Importance": perm.importances_mean,
@@ -572,8 +639,8 @@ with tabs[3]:
                 fig = px.bar(top, x="Importance", y="Feature", orientation="h", title="Top feature influence using permutation importance")
                 st.plotly_chart(fig, use_container_width=True)
                 st.write("**Explanation:** Higher importance means the model performance drops more when that feature is shuffled. These are the strongest available indicators of completion/stopping/shifting.")
-            except Exception as e:
-                st.warning(f"Permutation importance could not be computed: {e}")
+        except Exception as e:
+            st.warning(f"Permutation importance could not be computed: {e}")
 
 with tabs[4]:
     st.subheader("Association rules for degree behavior")
