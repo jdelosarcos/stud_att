@@ -5,6 +5,7 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"

@@ -2,7 +2,7 @@
 showErrorDetails = true
 
 [server]
-port = 10000
+port = 8501
 headless = true
 maxUploadSize = 200
 enableXsrfProtection = true
