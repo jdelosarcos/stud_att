@@ -1,12 +1,12 @@
 [client]
 showErrorDetails = true
-maxMessageSize = 200
 
 [server]
-maxUploadSize = 200
-enableXsrfProtection = true
 port = 10000
 headless = true
+maxUploadSize = 200
+enableXsrfProtection = true
+enableCORS = false
 
 [logger]
 level = "info"
